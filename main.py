@@ -1,32 +1,62 @@
+#!/usr/bin/env python3
+
 import os
+import logging
+from datetime import datetime
 from PIL import Image
 import numpy as np
 
-def make_color_transparent(img, target_color, tolerance_percent=10):
+# ==========================================
+# Configuration & Logging Setup
+# ==========================================
+INPUTS = './inputs'
+OUTPUTS = './outputs'
+LOG_DIR = './logs'
+
+# Ensure required directories exist before running
+os.makedirs(INPUTS, exist_ok=True)
+os.makedirs(OUTPUTS, exist_ok=True)
+os.makedirs(LOG_DIR, exist_ok=True)
+
+# Configure timestamped logging
+log_filename = datetime.now().strftime("transparent_%Y%m%d_%H%M%S.log")
+log_path = os.path.join(LOG_DIR, log_filename)
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler(log_path),
+        logging.StreamHandler() # Also print to console
+    ]
+)
+
+# ==========================================
+# Core Processing Functions
+# ==========================================
+def make_gradient_transparent(img, gradient_colors, tolerance_percent=10):
     """
-    Makes pixels near target_color transparent in a PIL image.
-
-    Args:
-        img (PIL.Image): Input image.
-        target_color (tuple): RGB color to make transparent, e.g. (255, 255, 255).
-        tolerance_percent (float): Percentage of max color distance to allow.
-
-    Returns:
-        PIL.Image: New image with transparency applied.
+    Makes pixels near any color in a gradient transparent in a PIL image.
+    Optimized to process all target colors in a single NumPy pass.
     """
     img = img.convert("RGBA")
     data = np.array(img)
 
-    rgb = data[:, :, :3].astype(np.int16)
+    # Use int32 to prevent integer overflow when squaring (16-bit caps at 32,767)
+    rgb = data[:, :, :3].astype(np.int32)
     alpha = data[:, :, 3]
-
-    target = np.array(target_color, dtype=np.int16)
-    distance = np.sqrt(np.sum((rgb - target) ** 2, axis=2))
 
     max_distance = np.sqrt(255**2 * 3)
     tolerance = (tolerance_percent / 100) * max_distance
 
-    mask = distance <= tolerance
+    mask = np.zeros(alpha.shape, dtype=bool)
+    
+    for target_color in gradient_colors:
+        # Match rgb array dtype
+        target = np.array(target_color, dtype=np.int32)
+        distance = np.sqrt(np.sum((rgb - target) ** 2, axis=2))
+        mask |= (distance <= tolerance)
+
     alpha[mask] = 0
 
     new_data = np.dstack((rgb, alpha))
@@ -36,19 +66,11 @@ def make_color_transparent(img, target_color, tolerance_percent=10):
 def linear_color_gradient(low_color, high_color, steps=10):
     """
     Generate a linear list of RGB colors from low_color to high_color.
-
-    Args:
-        low_color (tuple): (R, G, B) starting color (dark).
-        high_color (tuple): (R, G, B) ending color (light).
-        steps (int): Number of colors in the output list.
-
-    Returns:
-        list[tuple]: List of (R, G, B) colors from dark → light.
     """
     gradient = []
 
     for i in range(steps):
-        t = i / (steps - 1)  # normalized [0, 1]
+        t = i / (steps - 1) if steps > 1 else 0
 
         r = int(low_color[0] + t * (high_color[0] - low_color[0]))
         g = int(low_color[1] + t * (high_color[1] - low_color[1]))
@@ -58,36 +80,64 @@ def linear_color_gradient(low_color, high_color, steps=10):
 
     return gradient
 
+# ==========================================
+# Main Execution
+# ==========================================
+def main():
+    high_color = (218, 230, 248) 
+    low_color = (163, 177, 197)
+    tolerance = 3 #0.65 # Adjusted tolerance for better results based on testing
 
-INPUTS = './inputs'
-OUTPUTS = './outputs'
+    logging.info("Generating color gradient...")
+    color_gradient = linear_color_gradient(
+        low_color=low_color, 
+        high_color=high_color, 
+        steps=75
+    )
 
-# Create Color Gradient
-high_color = (218, 230, 248)
-low_color = (163, 177, 197)
-color_gradient = linear_color_gradient(
-    low_color=low_color, 
-    high_color=high_color, 
-    steps=75
-)
+    # ADDED: Explicitly add pure white to the target list to catch white backgrounds
+    color_gradient.append((255, 255, 255))
 
-tolerance = 0.65
+    try:
+        all_files = os.listdir(INPUTS)
+    except Exception as e:
+        logging.error(f"Failed to read input directory {INPUTS}: {e}")
+        return
 
-png_files = [f for f in os.listdir(f"{INPUTS}")]
+    if not all_files:
+        logging.warning(f"No files found in {INPUTS}. Exiting.")
+        return
 
-for file in png_files:
-    if file.lower().endswith(".png"):
+    # Categorize and log skipped files
+    png_files = []
+    for f in all_files:
+        if f.lower().endswith(".png"):
+            png_files.append(f)
+        else:
+            logging.info(f"Skipped non-PNG file: {f}")
+
+    if not png_files:
+        logging.warning(f"No valid PNG files to process in {INPUTS}. Exiting.")
+        return
+
+    logging.info(f"Starting processing for {len(png_files)} files.")
+
+    for file in png_files:
         input_path = os.path.join(INPUTS, file)
         output_path = os.path.join(OUTPUTS, file)
 
+        try:
+            img = Image.open(input_path)
+            
+            result = make_gradient_transparent(img, color_gradient, tolerance)
+            
+            result.save(output_path)
+            logging.info(f"Successfully processed and saved to {output_path}")
+            
+        except Exception as e:
+            logging.error(f"Error processing file {file}: {e}", exc_info=True)
 
-        img = Image.open(input_path)
+    logging.info("Batch processing complete.")
 
-        for i, target_color in enumerate(color_gradient):
-        
-            result = make_color_transparent(img, target_color, tolerance)
-            img = result
-
-        result.save(output_path)
-
-        print(f"Saved to {output_path}")
+if __name__ == "__main__":
+    main()
